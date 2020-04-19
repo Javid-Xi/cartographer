@@ -24,6 +24,17 @@ namespace cartographer {
 namespace mapping {
 namespace scan_matching {
 
+/**
+ * @brief SearchParameters::SearchParameters
+ * 根据设置的线性搜索窗口 & 角度搜索窗口的大小 来计算一些搜索参数。实际的范围是设置的2倍。因为正负都要搜索
+ * 这里比较要注意的就是角度搜索步长的确定。
+ * 角度步长的确定方法见论文"Real-Time Loop Closure in 2D LIDAR SLAM"的式6,式7
+ * @param linear_search_window      线性窗口的大小
+ * @param angular_search_window     角度窗口的大小
+ * @param point_cloud               对应的点云数据
+ * @param resolution                地图的分辨率
+ */
+
 SearchParameters::SearchParameters(const double linear_search_window,
                                    const double angular_search_window,
                                    const sensor::PointCloud& point_cloud,
@@ -32,21 +43,38 @@ SearchParameters::SearchParameters(const double linear_search_window,
   // We set this value to something on the order of resolution to make sure that
   // the std::acos() below is defined.
   float max_scan_range = 3.f * resolution;
+
+  //得到激光束中的最大距离
   for (const sensor::RangefinderPoint& point : point_cloud) {
     const float range = point.position.head<2>().norm();
     max_scan_range = std::max(range, max_scan_range);
   }
+
+  //为保险起见 乘以一个略小于1的值
   const double kSafetyMargin = 1. - 1e-3;
+
+  //计算搜索时候的角度步长  计算的原则是当角度步长++的时候，最长的激光的唯一不会超过resolution
+  //见论文"Real-Time Loop Closure in 2D LIDAR SLAM"的式6,式7
+  //对于一个６m的激光雷达来说  2.5cm的分辨率 -->angular_step_size = 0.2degree
+  //                         5cm的分辨率 -->angular_step_size = 0.48degree
+
   angular_perturbation_step_size =
       kSafetyMargin * std::acos(1. - common::Pow2(resolution) /
                                          (2. * common::Pow2(max_scan_range)));
+
+  //根据角度步长和搜索窗口的大小计算角度有多少个离散值
   num_angular_perturbations =
       std::ceil(angular_search_window / angular_perturbation_step_size);
+
+  //由于要正负两个方向都搜索，因此最终的离散值要*2
   num_scans = 2 * num_angular_perturbations + 1;
 
+ //线性搜索的离散值多少
   const int num_linear_perturbations =
       std::ceil(linear_search_window / resolution);
   linear_bounds.reserve(num_scans);
+
+  //每个旋转都需要有一个对应的线性窗口
   for (int i = 0; i != num_scans; ++i) {
     linear_bounds.push_back(
         LinearBounds{-num_linear_perturbations, num_linear_perturbations,
@@ -90,17 +118,28 @@ void SearchParameters::ShrinkToFit(const std::vector<DiscreteScan2D>& scans,
   }
 }
 
+/**
+ * @brief GenerateRotatedScans
+ * 根据搜索参数把激光数据进行多次旋转 相当于在进行compute 2d slice的时候进行最外层的角度循环
+ * 这里的激光进行转化之后，虽然角度和世界坐标系重合，但是原点依然是不重合的
+ * @param point_cloud           初始角度为0的点云数据
+ * @param search_parameters     对应的搜索函数
+ * @return                      经过一系列旋转之后的激光点云
+ */
+
 std::vector<sensor::PointCloud> GenerateRotatedScans(
     const sensor::PointCloud& point_cloud,
     const SearchParameters& search_parameters) {
   std::vector<sensor::PointCloud> rotated_scans;
   rotated_scans.reserve(search_parameters.num_scans);
 
+  //搜索的角度的起点 -offset
   double delta_theta = -search_parameters.num_angular_perturbations *
                        search_parameters.angular_perturbation_step_size;
   for (int scan_index = 0; scan_index < search_parameters.num_scans;
        ++scan_index,
            delta_theta += search_parameters.angular_perturbation_step_size) {
+    //把角度进行旋转并转换为点云
     rotated_scans.push_back(sensor::TransformPointCloud(
         point_cloud, transform::Rigid3f::Rotation(Eigen::AngleAxisf(
                          delta_theta, Eigen::Vector3f::UnitZ()))));
@@ -108,17 +147,38 @@ std::vector<sensor::PointCloud> GenerateRotatedScans(
   return rotated_scans;
 }
 
+/**
+ * @brief DiscretizeScans
+ * 把一系列的激光数据scans转换到世界坐标系中的坐标(initial_translation)。
+ * 因为在进行rotated scans生成的时候，激光数据的角度已经和世界坐标系重合了。
+ * 因此这里进行转换的时候只需要进行平移就可以了。
+ * 然后把世界坐标系中的物理坐标离散化，转换为地图坐标系的坐标
+ * 这个函数返回一些列地图坐标系中的激光扫描数据
+ *
+ * 经过这个函数之后，各个激光数据角度都和世界坐标系对齐了。
+ * 原点都和世界坐标系重合了。
+ *
+ * @param map_limits            地图的分辨率等信息
+ * @param scans                 激光数据
+ * @param initial_translation   激光数据的原点
+ * @return
+ */
+
 std::vector<DiscreteScan2D> DiscretizeScans(
     const MapLimits& map_limits, const std::vector<sensor::PointCloud>& scans,
     const Eigen::Translation2f& initial_translation) {
   std::vector<DiscreteScan2D> discrete_scans;
   discrete_scans.reserve(scans.size());
+
+  //all
   for (const sensor::PointCloud& scan : scans) {
     discrete_scans.emplace_back();
     discrete_scans.back().reserve(scan.size());
     for (const sensor::RangefinderPoint& point : scan) {
+      //转换到世界坐标系中
       const Eigen::Vector2f translated_point =
           Eigen::Affine2f(initial_translation) * point.position.head<2>();
+      //把世界坐标系中的点转换到地图坐标系中
       discrete_scans.back().push_back(
           map_limits.GetCellIndex(translated_point));
     }

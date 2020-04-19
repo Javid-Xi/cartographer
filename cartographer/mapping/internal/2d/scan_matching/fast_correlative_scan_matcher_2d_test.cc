@@ -37,6 +37,7 @@ namespace {
 TEST(PrecomputationGridTest, CorrectValues) {
   // Create a probability grid with random values that can be exactly
   // represented by uint8 values.
+  
   std::mt19937 prng(42);
   std::uniform_int_distribution<int> distribution(0, 255);
   ValueConversionTables conversion_tables;

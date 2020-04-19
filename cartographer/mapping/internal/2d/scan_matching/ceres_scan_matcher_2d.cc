@@ -31,6 +31,14 @@
 #include "ceres/ceres.h"
 #include "glog/logging.h"
 
+/*
+ * 用优化的方式进行scan-match。也就是说这里是用梯度下降的方式来进行scan-match
+ * 因此这里的作用实际上和gmapping的hill-climb方法是差不多的。
+ * 这种局部优化的方法很容易陷入到局部极小值当中。因此这个方法能正常工作的前提是初始值离全局最优值比较近。
+ * 因此这个方法一般是用作其他方法的优化。
+ * 比如在cartographer中　在调用这个方法之前，首先会用CSM方法来进行搜索出来一个初值，然后再用这个优化的方法来进行优化
+*/
+
 namespace cartographer {
 namespace mapping {
 namespace scan_matching {
@@ -73,6 +81,8 @@ void CeresScanMatcher2D::Match(const Eigen::Vector2d& target_translation,
   CHECK_GT(options_.occupied_space_weight(), 0.);
   switch (grid.GetGridType()) {
     case GridType::PROBABILITY_GRID:
+
+    //构造残差--栅格
       problem.AddResidualBlock(
           CreateOccupiedSpaceCostFunction2D(
               options_.occupied_space_weight() /
@@ -81,6 +91,8 @@ void CeresScanMatcher2D::Match(const Eigen::Vector2d& target_translation,
           nullptr /* loss function */, ceres_pose_estimate);
       break;
     case GridType::TSDF:
+
+    //构造残差--平移
       problem.AddResidualBlock(
           CreateTSDFMatchCostFunction2D(
               options_.occupied_space_weight() /
@@ -90,6 +102,8 @@ void CeresScanMatcher2D::Match(const Eigen::Vector2d& target_translation,
       break;
   }
   CHECK_GT(options_.translation_weight(), 0.);
+
+     //构造残差--旋转
   problem.AddResidualBlock(
       TranslationDeltaCostFunctor2D::CreateAutoDiffCostFunction(
           options_.translation_weight(), target_translation),
@@ -100,8 +114,10 @@ void CeresScanMatcher2D::Match(const Eigen::Vector2d& target_translation,
           options_.rotation_weight(), ceres_pose_estimate[2]),
       nullptr /* loss function */, ceres_pose_estimate);
 
+    //求解器
   ceres::Solve(ceres_solver_options_, &problem, summary);
 
+    //优化完毕之后得到的最优位姿
   *pose_estimate = transform::Rigid2d(
       {ceres_pose_estimate[0], ceres_pose_estimate[1]}, ceres_pose_estimate[2]);
 }
